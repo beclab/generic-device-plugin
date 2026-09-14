@@ -54,6 +54,7 @@ For example, to expose the serial devices to the /dev/serial directory: {"name":
 	flag.String("plugin-directory", v1beta1.DevicePluginPath, "The directory in which to create plugin sockets.")
 	flag.String("log-level", logLevelInfo, fmt.Sprintf("Log level to use. Possible values: %s", availableLogLevels))
 	flag.String("listen", ":8080", "The address at which to listen for health and metrics.")
+	flag.Bool("platform-devices", false, "Expose serial, video, audio and HID devices as stable per-device resources and publish node inventory.")
 	flag.Bool("version", false, "Print version and exit")
 
 	flag.Parse()

@@ -16,7 +16,7 @@ package deviceplugin
 
 import (
 	"context"
-	"encoding/base64"
+	"crypto/sha256"
 	"fmt"
 	"net"
 	"os"
@@ -34,9 +34,15 @@ import (
 
 const (
 	socketPrefix        = "gdp"
+	socketHashBytes     = 16
 	socketCheckInterval = 1 * time.Second
 	restartInterval     = 5 * time.Second
 )
+
+func socketName(resource string, timestamp int64) string {
+	digest := sha256.Sum256([]byte(resource))
+	return fmt.Sprintf("%s-%x-%d.sock", socketPrefix, digest[:socketHashBytes], timestamp)
+}
 
 // Plugin is a Kubernetes device plugin that can be run.
 type Plugin interface {
@@ -68,7 +74,7 @@ func NewPlugin(resource, pluginDir string, dps v1beta1.DevicePluginServer, logge
 		DevicePluginServer: dps,
 		resource:           resource,
 		pluginDir:          pluginDir,
-		socket:             filepath.Join(pluginDir, fmt.Sprintf("%s-%s-%d.sock", socketPrefix, base64.StdEncoding.EncodeToString([]byte(resource)), time.Now().Unix())),
+		socket:             filepath.Join(pluginDir, socketName(resource, time.Now().Unix())),
 		logger:             logger,
 		restartsTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "device_plugin_restarts_total",

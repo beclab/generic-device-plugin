@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/squat/generic-device-plugin/deviceplugin"
+	"github.com/squat/generic-device-plugin/platformdevices"
 	"github.com/squat/generic-device-plugin/version"
 )
 
@@ -117,7 +118,7 @@ func Main() error {
 			}
 		}
 	}
-	if len(deviceSpecs) == 0 {
+	if len(deviceSpecs) == 0 && !viper.GetBool("platform-devices") {
 		return fmt.Errorf("at least one device must be specified")
 	}
 
@@ -200,6 +201,20 @@ func Main() error {
 	}
 
 	pluginPath := viper.GetString("plugin-directory")
+	if viper.GetBool("platform-devices") {
+		nodeName := os.Getenv("NODE_NAME")
+		if nodeName == "" {
+			return fmt.Errorf("NODE_NAME environment variable is required when platform-devices is enabled")
+		}
+		manager := platformdevices.NewManager(platformdevices.ManagerConfig{
+			NodeName:   nodeName,
+			PluginDir:  pluginPath,
+			Logger:     log.With(logger, "component", "platform-devices"),
+			Registerer: r,
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		g.Add(func() error { return manager.Run(ctx) }, func(error) { cancel() })
+	}
 	for i := range deviceSpecs {
 		d := deviceSpecs[i]
 

@@ -3,3 +3,5 @@
 /result*
 /e2e-*/
 /help.txt
+/vendor/
+.idea/

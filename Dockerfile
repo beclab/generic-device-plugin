@@ -1,24 +1,15 @@
-FROM --platform=$BUILDPLATFORM docker.io/nixos/nix:2.34.6 AS builder
+FROM golang:1.26.0-alpine AS builder
 
-COPY . /tmp/build
-WORKDIR /tmp/build
+WORKDIR /src
 
-ARG BUILDOS
-ARG BUILDARCH
-ARG TARGETOS
-ARG TARGETARCH
-ARG VERSION
+COPY go.mod go.sum ./
+RUN go mod download
 
-RUN VERSION="$VERSION" nix \
-    --extra-experimental-features "nix-command flakes" \
-    --option filter-syscalls false \
-    build --impure ".#generic-device-plugin-cross-$TARGETOS-$TARGETARCH"
-RUN ln -s ../bin result/bin/"$BUILDOS"_"$BUILDARCH"
-FROM scratch
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/generic-device-plugin .
 
-ARG TARGETOS
-ARG TARGETARCH
+FROM beclab/alpine:3.18
 
-COPY --from=builder /tmp/build/result/bin/"$TARGETOS"_"$TARGETARCH"/generic-device-plugin /generic-device-plugin
+COPY --from=builder /out/generic-device-plugin /generic-device-plugin
 
 ENTRYPOINT ["/generic-device-plugin"]

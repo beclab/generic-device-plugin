@@ -32,28 +32,7 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
-          - --device
-          - |
-            name: serial
-            groups:
-              - paths:
-                  - path: /dev/ttyUSB*
-              - paths:
-                  - path: /dev/ttyACM*
-              - paths:
-                  - path: /dev/tty.usb*
-              - paths:
-                  - path: /dev/cu.*
-              - paths:
-                  - path: /dev/cuaU*
-              - paths:
-                  - path: /dev/rfcomm*
-          - --device
-          - |
-            name: video
-            groups:
-              - paths:
-                  - path: /dev/video0
+          - --platform-devices
           - --device
           - |
             name: fuse
@@ -61,35 +40,11 @@ spec:
               - count: 10
                 paths:
                   - path: /dev/fuse
-          - --device
-          - |
-            name: audio
-            groups:
-              - count: 10
-                paths:
-                  - path: /dev/snd
-          - --device
-          - |
-            name: capture
-            groups:
-              - paths:
-                  - path: /dev/snd/controlC0
-                  - path: /dev/snd/pcmC0D0c
-              - paths:
-                  - path: /dev/snd/controlC1
-                    mountPath: /dev/snd/controlC0
-                  - path: /dev/snd/pcmC1D0c
-                    mountPath: /dev/snd/pcmC0D0c
-              - paths:
-                  - path: /dev/snd/controlC2
-                    mountPath: /dev/snd/controlC0
-                  - path: /dev/snd/pcmC2D0c
-                    mountPath: /dev/snd/pcmC0D0c
-              - paths:
-                  - path: /dev/snd/controlC3
-                    mountPath: /dev/snd/controlC0
-                  - path: /dev/snd/pcmC3D0c
-                    mountPath: /dev/snd/pcmC0D0c
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           ports:
@@ -102,6 +57,15 @@ spec:
               mountPath: /var/lib/kubelet/device-plugins
             - name: dev
               mountPath: /dev
+            - name: sys
+              mountPath: /sys
+              readOnly: true
+            - name: dbus
+              mountPath: /run/dbus
+              readOnly: true
+            - name: udev
+              mountPath: /run/udev
+              readOnly: true
       volumes:
         - name: device-plugin
           hostPath:
@@ -109,5 +73,14 @@ spec:
         - name: dev
           hostPath:
             path: /dev
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: dbus
+          hostPath:
+            path: /run/dbus
+        - name: udev
+          hostPath:
+            path: /run/udev
   updateStrategy:
     type: RollingUpdate

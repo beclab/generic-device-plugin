@@ -33,7 +33,15 @@ type Device struct {
 	KernelPaths  []string `json:"kernelPaths,omitempty"`
 	PortUnstable bool     `json:"portUnstable,omitempty"`
 	Reason       string   `json:"reason,omitempty"`
-	Type         string   `json:"-"`
+	// Vendor and Product are the USB idVendor and idProduct, lowercase and
+	// without a 0x prefix. USBParent is the parent port name shared by
+	// devices on the same plug, for example "1-4" for 1-4.1, 1-4.2, and
+	// 1-4.4. It is not the device's own port and not a sysfs path.
+	// The hardware serial is not published.
+	Vendor       string `json:"vendor,omitempty"`
+	Product      string `json:"product,omitempty"`
+	USBParent    string `json:"usbParent,omitempty"`
+	Type         string `json:"-"`
 	physicalPath string
 	serialBased  bool
 }
@@ -197,7 +205,7 @@ func inspectUSBSerialDevice(devicePath, usbParent string) Device {
 		displayName = filepath.Base(devicePath)
 	}
 	uid := stableUID(identity, stable)
-	return Device{
+	device := Device{
 		UID:          uid,
 		ResourceName: fmt.Sprintf("%s/serial-%s", resourceDomain, uid),
 		DisplayName:  displayName,
@@ -209,6 +217,8 @@ func inspectUSBSerialDevice(devicePath, usbParent string) Device {
 		physicalPath: physicalPath,
 		serialBased:  stable,
 	}
+	applyUSBInventory(&device, usbParent)
+	return device
 }
 
 func usbSerialFunction(devicePath, usbParent string, properties map[string]string) (interfaceNumber, portNumber string) {
@@ -285,7 +295,7 @@ func inspectUSBVideoDevice(paths []string, usbParent string) Device {
 		displayName = filepath.Base(primary)
 	}
 	uid := stableUID(identity, stable)
-	return Device{
+	device := Device{
 		UID:          uid,
 		ResourceName: fmt.Sprintf("%s/video-%s", resourceDomain, uid),
 		DisplayName:  displayName,
@@ -297,6 +307,8 @@ func inspectUSBVideoDevice(paths []string, usbParent string) Device {
 		physicalPath: physicalPath,
 		serialBased:  stable,
 	}
+	applyUSBInventory(&device, usbParent)
+	return device
 }
 
 func syncDeviceIndexAt(root string, devices []Device) error {
@@ -360,6 +372,11 @@ func mergeDeviceGroups(devices []Device) []Device {
 		if current.Reason == "" {
 			current.Reason = device.Reason
 		}
+		if current.Vendor == "" {
+			current.Vendor = device.Vendor
+			current.Product = device.Product
+			current.USBParent = device.USBParent
+		}
 		byResource[device.ResourceName] = current
 	}
 	result := make([]Device, 0, len(byResource))
@@ -391,6 +408,9 @@ func inspectDevice(class string, paths []string) Device {
 	if device.DisplayName == "" {
 		device.DisplayName = filepath.Base(primary)
 	}
+	if usbDevice, ok := usbParentForDevicePath(primary, sysfsClass(primary)); ok {
+		applyUSBInventory(&device, usbDevice)
+	}
 	return device
 }
 
@@ -405,21 +425,25 @@ func stableUID(identity string, stable bool) string {
 	return prefix + hex.EncodeToString(sum[:16])
 }
 
-func sysfsIdentity(devicePath string) (identity, displayName, physicalPath string, stable bool) {
+func sysfsClass(devicePath string) string {
 	name := filepath.Base(devicePath)
-	class := ""
 	switch {
 	case strings.HasPrefix(name, "video"):
-		class = "video4linux"
+		return "video4linux"
 	case strings.HasPrefix(name, "media"):
-		class = "media"
+		return "media"
 	case strings.HasPrefix(name, "hidraw"):
-		class = "hidraw"
+		return "hidraw"
 	case strings.HasPrefix(devicePath, "/dev/snd/"):
-		class = "sound"
+		return "sound"
 	default:
-		class = "tty"
+		return "tty"
 	}
+}
+
+func sysfsIdentity(devicePath string) (identity, displayName, physicalPath string, stable bool) {
+	name := filepath.Base(devicePath)
+	class := sysfsClass(devicePath)
 
 	udevData := readUdevDeviceData(devicePath)
 	properties := udevData.properties
@@ -515,6 +539,43 @@ func readUdevProperties(devicePath string) map[string]string {
 func isKeyboardDevice(devicePath string) bool {
 	properties := readUdevProperties(devicePath)
 	return properties["ID_INPUT_KEYBOARD"] == "1" || properties["ID_INPUT_KEY"] == "1" && strings.Contains(strings.ToLower(properties["ID_MODEL"]), "keyboard")
+}
+
+func applyUSBInventory(device *Device, usbDeviceDir string) {
+	info, ok := readUSBInventory(usbDeviceDir)
+	if !ok {
+		return
+	}
+	device.Vendor = info.Vendor
+	device.Product = info.Product
+	device.USBParent = info.ParentPort
+}
+
+type usbInventory struct {
+	Vendor     string
+	Product    string
+	ParentPort string
+}
+
+// readUSBInventory reads the USB device directory that contains idVendor and
+// idProduct. ParentPort is that directory's parent name, so devices behind
+// the same plug share it. The hardware serial file is ignored.
+func readUSBInventory(usbDeviceDir string) (usbInventory, bool) {
+	vendor := normalizeUSBID(readTrimmed(filepath.Join(usbDeviceDir, "idVendor")))
+	product := normalizeUSBID(readTrimmed(filepath.Join(usbDeviceDir, "idProduct")))
+	if vendor == "" || product == "" {
+		return usbInventory{}, false
+	}
+	parentPort := filepath.Base(filepath.Dir(usbDeviceDir))
+	if parentPort == "" || parentPort == "." || parentPort == string(filepath.Separator) {
+		return usbInventory{}, false
+	}
+	return usbInventory{Vendor: vendor, Product: product, ParentPort: parentPort}, true
+}
+
+func normalizeUSBID(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	return strings.TrimPrefix(id, "0x")
 }
 
 func readTrimmed(name string) string {

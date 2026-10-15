@@ -144,6 +144,9 @@ func TestInspectUSBVideoDeviceWithoutHardwareSerialUsesPortIdentity(t *testing.T
 	if got := device.KernelPaths; len(got) != 3 || got[0] != "/dev/media0" || got[1] != "/dev/video0" || got[2] != "/dev/video1" {
 		t.Fatalf("kernel paths = %#v", got)
 	}
+	if device.Vendor != "0c45" || device.Product != "6368" || device.USBParent != filepath.Base(filepath.Dir(usbParent)) {
+		t.Fatalf("USB inventory = vendor %q product %q parent %q", device.Vendor, device.Product, device.USBParent)
+	}
 }
 
 func TestInspectUSBVideoDeviceWithHardwareSerialUsesStableIdentity(t *testing.T) {
@@ -162,6 +165,16 @@ func TestInspectUSBVideoDeviceWithHardwareSerialUsesStableIdentity(t *testing.T)
 	wantUID := stableUID(identity, stable)
 	if device.UID != wantUID || device.PortUnstable || !device.serialBased {
 		t.Fatalf("serial-based video identity = %#v", device)
+	}
+	encoded, err := json.Marshal(device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("camera-123")) {
+		t.Fatalf("hardware serial was published: %s", encoded)
+	}
+	if device.Vendor != "0c45" || device.Product != "6368" {
+		t.Fatalf("USB inventory = vendor %q product %q", device.Vendor, device.Product)
 	}
 }
 
@@ -206,6 +219,62 @@ func TestBuildUSBIdentityUsesPhysicalPathWithoutHardwareSerial(t *testing.T) {
 	}, "\x00")
 	if identity != want || stable {
 		t.Fatalf("path identity = %q stable=%t", identity, stable)
+	}
+}
+
+func TestUSBInventoryUsesParentPortAndOmitsSerial(t *testing.T) {
+	root := t.TempDir()
+	deviceDir := filepath.Join(root, "1-4", "1-4.1")
+	if err := os.MkdirAll(filepath.Join(deviceDir, "1-4.1:1.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"idVendor":  "38FB\n",
+		"idProduct": "0x1001\n",
+		"serial":    "100025004261401127\n",
+		"product":   "Reachy Mini Audio\n",
+	} {
+		if err := os.WriteFile(filepath.Join(deviceDir, name), []byte(value), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	info, ok := readUSBInventory(deviceDir)
+	if !ok {
+		t.Fatal("readUSBInventory() missed a USB device directory")
+	}
+	if info.Vendor != "38fb" || info.Product != "1001" || info.ParentPort != "1-4" {
+		t.Fatalf("inventory = %#v", info)
+	}
+	device := inspectUSBSerialDevice(filepath.Join(t.TempDir(), "not-a-tty"), deviceDir)
+	encoded, err := json.Marshal(device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if device.Vendor != "38fb" || device.Product != "1001" || device.USBParent != "1-4" {
+		t.Fatalf("serial device inventory = vendor %q product %q parent %q", device.Vendor, device.Product, device.USBParent)
+	}
+	if bytes.Contains(encoded, []byte("100025004261401127")) {
+		t.Fatalf("hardware serial was published: %s", encoded)
+	}
+	if !strings.HasPrefix(device.ResourceName, "devices.bytetrade.io/serial-") || device.UID == "" {
+		t.Fatalf("resource identity missing: %#v", device)
+	}
+}
+
+func TestUSBInventoryRejectsDirectoryWithoutIDs(t *testing.T) {
+	dir := t.TempDir()
+	if _, ok := readUSBInventory(dir); ok {
+		t.Fatal("readUSBInventory() accepted a directory without USB ids")
+	}
+}
+
+func TestMergeDeviceGroupsKeepsUSBInventory(t *testing.T) {
+	devices := mergeDeviceGroups([]Device{
+		{UID: "s-1", ResourceName: "devices.bytetrade.io/video-s-1", Type: "video", Selectable: true, KernelPaths: []string{"/dev/video1"}},
+		{UID: "s-1", ResourceName: "devices.bytetrade.io/video-s-1", Type: "video", Selectable: true, KernelPaths: []string{"/dev/video0"}, Vendor: "38fb", Product: "1002", USBParent: "1-4"},
+	})
+	if len(devices) != 1 || devices[0].Vendor != "38fb" || devices[0].Product != "1002" || devices[0].USBParent != "1-4" {
+		t.Fatalf("USB inventory was dropped while merging: %#v", devices)
 	}
 }
 

@@ -55,6 +55,7 @@ For example, to expose the serial devices to the /dev/serial directory: {"name":
 	flag.String("log-level", logLevelInfo, fmt.Sprintf("Log level to use. Possible values: %s", availableLogLevels))
 	flag.String("listen", ":8080", "The address at which to listen for health and metrics.")
 	flag.Bool("platform-devices", false, "Expose serial, video, audio and HID devices as stable per-device resources and publish node inventory.")
+	flag.StringArray("audio-usb-control", []string{"38fb:1001"}, `USB vendor:product pairs whose ALSA cards also expose a usbfs control node in KernelPaths (repeatable). Example: 38fb:1001`)
 	flag.Bool("version", false, "Print version and exit")
 
 	flag.Parse()

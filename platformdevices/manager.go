@@ -15,15 +15,17 @@ import (
 const scanInterval = 5 * time.Second
 
 type ManagerConfig struct {
-	NodeName   string
-	PluginDir  string
-	Logger     log.Logger
-	Registerer prometheus.Registerer
+	NodeName        string
+	PluginDir       string
+	Logger          log.Logger
+	Registerer      prometheus.Registerer
+	AudioUSBControl []AudioUSBID
 }
 
 type runningPlugin struct {
-	cancel context.CancelFunc
-	done   <-chan error
+	cancel      context.CancelFunc
+	done        <-chan error
+	kernelPaths []string
 }
 
 type Manager struct {
@@ -35,6 +37,9 @@ type Manager struct {
 func NewManager(config ManagerConfig) *Manager {
 	if config.Logger == nil {
 		config.Logger = log.NewNopLogger()
+	}
+	if config.AudioUSBControl == nil {
+		config.AudioUSBControl = DefaultAudioUSBControl()
 	}
 	return &Manager{config: config, plugins: make(map[string]runningPlugin)}
 }
@@ -60,9 +65,14 @@ func (m *Manager) Run(ctx context.Context) error {
 }
 
 func (m *Manager) reconcile(ctx context.Context, publisher *Publisher) error {
-	devices, err := Scan()
+	devices, err := ScanWithConfig(ScanConfig{AudioUSBControl: m.config.AudioUSBControl})
 	if err != nil {
 		return err
+	}
+	for _, device := range devices {
+		if device.Type == "audio" {
+			applyUSBFSPermissions(device.KernelPaths)
+		}
 	}
 	current := make(map[string]Device, len(devices))
 	for _, device := range devices {
@@ -80,7 +90,17 @@ func (m *Manager) reconcile(ctx context.Context, publisher *Publisher) error {
 			continue
 		default:
 		}
-		if _, ok := current[resourceName]; !ok {
+		device, ok := current[resourceName]
+		if !ok {
+			running.cancel()
+			delete(m.plugins, resourceName)
+			continue
+		}
+		if !kernelPathsEqual(running.kernelPaths, device.KernelPaths) {
+			_ = level.Info(m.config.Logger).Log(
+				"msg", "restarting platform device plugin after kernelPaths change",
+				"resource", resourceName,
+			)
 			running.cancel()
 			delete(m.plugins, resourceName)
 		}
@@ -102,7 +122,8 @@ func (m *Manager) reconcile(ctx context.Context, publisher *Publisher) error {
 		plugin := deviceplugin.NewGenericPlugin(spec, m.config.PluginDir, log.With(m.config.Logger, "resource", resourceName), registerer, false)
 		done := make(chan error, 1)
 		go func() { done <- plugin.Run(pluginCtx) }()
-		m.plugins[resourceName] = runningPlugin{cancel: cancel, done: done}
+		pathsCopy := append([]string(nil), device.KernelPaths...)
+		m.plugins[resourceName] = runningPlugin{cancel: cancel, done: done, kernelPaths: pathsCopy}
 		_ = level.Info(m.config.Logger).Log("msg", "started platform device plugin", "resource", resourceName)
 	}
 	return publisher.Publish(ctx, BuildInventory(devices), BluetoothCapable())

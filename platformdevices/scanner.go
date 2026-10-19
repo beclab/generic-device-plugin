@@ -46,7 +46,17 @@ type Inventory struct {
 	HID           []Device `json:"hid,omitempty"`
 }
 
+// Scan discovers devices using DefaultAudioUSBControl.
 func Scan() ([]Device, error) {
+	return ScanWithConfig(ScanConfig{AudioUSBControl: DefaultAudioUSBControl()})
+}
+
+// ScanWithConfig discovers devices using the given allowlist for audio usbfs nodes.
+func ScanWithConfig(cfg ScanConfig) ([]Device, error) {
+	allow := cfg.AudioUSBControl
+	if allow == nil {
+		allow = DefaultAudioUSBControl()
+	}
 	groups := []struct {
 		class    string
 		patterns []string
@@ -101,6 +111,9 @@ func Scan() ([]Device, error) {
 		}
 		paths, _ := filepath.Glob("/dev/snd/*C" + match[1] + "D*")
 		paths = append([]string{control}, paths...)
+		if usbfsPath, vendor, product, ok := usbfsPathForSoundControl(control); ok && matchesAudioUSBControl(allow, vendor, product) {
+			paths = append(paths, usbfsPath)
+		}
 		result = append(result, inspectDevice("audio", paths))
 	}
 	result = mergeDeviceGroups(result)
@@ -167,8 +180,11 @@ func usbParentForDevicePath(devicePath, class string) (string, bool) {
 	}
 }
 
+// sysfsRoot is the mount point for sysfs; tests may point it at a fake tree.
+var sysfsRoot = "/sys"
+
 func sysfsDevicePath(devicePath, class, name string) (string, error) {
-	classPath := filepath.Join("/sys/class", class, name, "device")
+	classPath := filepath.Join(sysfsRoot, "class", class, name, "device")
 	if sysPath, err := filepath.EvalSymlinks(classPath); err == nil {
 		return sysPath, nil
 	}
@@ -176,7 +192,7 @@ func sysfsDevicePath(devicePath, class, name string) (string, error) {
 	if err := unix.Stat(devicePath, &stat); err != nil {
 		return "", err
 	}
-	deviceNumberPath := fmt.Sprintf("/sys/dev/char/%d:%d", unix.Major(uint64(stat.Rdev)), unix.Minor(uint64(stat.Rdev)))
+	deviceNumberPath := fmt.Sprintf("%s/dev/char/%d:%d", sysfsRoot, unix.Major(uint64(stat.Rdev)), unix.Minor(uint64(stat.Rdev)))
 	return filepath.EvalSymlinks(deviceNumberPath)
 }
 
@@ -364,7 +380,7 @@ func mergeDeviceGroups(devices []Device) []Device {
 	}
 	result := make([]Device, 0, len(byResource))
 	for _, device := range byResource {
-		sort.Strings(device.KernelPaths)
+		device.KernelPaths = normalizeKernelPaths(device.Type, device.KernelPaths)
 		result = append(result, device)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ResourceName < result[j].ResourceName })
@@ -372,7 +388,10 @@ func mergeDeviceGroups(devices []Device) []Device {
 }
 
 func inspectDevice(class string, paths []string) Device {
-	sort.Strings(paths)
+	paths = normalizeKernelPaths(class, paths)
+	if len(paths) == 0 {
+		return Device{Type: class, Online: true}
+	}
 	primary := paths[0]
 	identity, displayName, physicalPath, stable := sysfsIdentity(primary)
 	uid := stableUID(identity, stable)

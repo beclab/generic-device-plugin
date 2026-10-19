@@ -206,11 +206,16 @@ func Main() error {
 		if nodeName == "" {
 			return fmt.Errorf("NODE_NAME environment variable is required when platform-devices is enabled")
 		}
+		audioUSBControl, err := platformdevices.ParseAudioUSBControl(viper.GetStringSlice("audio-usb-control"))
+		if err != nil {
+			return fmt.Errorf("failed to parse audio-usb-control: %w", err)
+		}
 		manager := platformdevices.NewManager(platformdevices.ManagerConfig{
-			NodeName:   nodeName,
-			PluginDir:  pluginPath,
-			Logger:     log.With(logger, "component", "platform-devices"),
-			Registerer: r,
+			NodeName:        nodeName,
+			PluginDir:       pluginPath,
+			Logger:          log.With(logger, "component", "platform-devices"),
+			Registerer:      r,
+			AudioUSBControl: audioUSBControl,
 		})
 		ctx, cancel := context.WithCancel(context.Background())
 		g.Add(func() error { return manager.Run(ctx) }, func(error) { cancel() })

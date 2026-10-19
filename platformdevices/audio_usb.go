@@ -3,7 +3,6 @@ package platformdevices
 import (
 	"fmt"
 	"os"
-	"os/user"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -161,26 +160,18 @@ func kernelPathsEqual(a, b []string) bool {
 	return true
 }
 
-const defaultAudioGID = 29
-
-func audioGID() int {
-	group, err := user.LookupGroup("audio")
-	if err != nil {
-		return defaultAudioGID
-	}
-	id, err := strconv.Atoi(group.Gid)
-	if err != nil {
-		return defaultAudioGID
-	}
-	return id
-}
+// olaresAudioGID is the host audio group used by app-service supplementalGroups
+// for device.audio (Debian/Ubuntu audio=29). Do not LookupGroup("audio") inside
+// the plugin image: Alpine's audio group is 18 and would chown host nodes to a
+// GID that application pods cannot use.
+const olaresAudioGID = 29
 
 // ensureUSBFSPermissions sets root:audio 0660 on a usbfs node.
 func ensureUSBFSPermissions(path string) error {
 	if !strings.HasPrefix(path, "/dev/bus/usb/") {
 		return fmt.Errorf("not a usbfs path: %s", path)
 	}
-	gid := audioGID()
+	gid := olaresAudioGID
 	if err := unix.Chown(path, 0, gid); err != nil {
 		return fmt.Errorf("chown %s root:%d: %w", path, gid, err)
 	}

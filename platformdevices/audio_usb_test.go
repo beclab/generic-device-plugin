@@ -102,6 +102,12 @@ func TestEnsureUSBFSPermissionsRejectsNonUSBFS(t *testing.T) {
 	}
 }
 
+func TestOlaresAudioGIDMatchesAppService(t *testing.T) {
+	if olaresAudioGID != 29 {
+		t.Fatalf("olaresAudioGID=%d want 29 (app-service device.audio supplementalGroups)", olaresAudioGID)
+	}
+}
+
 func TestUSBFSPathForSoundControlAllowlist(t *testing.T) {
 	root := t.TempDir()
 	usbDev := filepath.Join(root, "devices", "pci0000:00", "usb1", "1-4", "1-4.1")

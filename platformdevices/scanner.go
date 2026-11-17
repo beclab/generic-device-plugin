@@ -1,17 +1,20 @@
 package platformdevices
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"k8s.io/klog/v2"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/godbus/dbus/v5"
 	"golang.org/x/sys/unix"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -116,24 +119,80 @@ func Scan() ([]Device, error) {
 
 func scanBluetoothAdaptersAt(classRoot string) []Device {
 	paths, err := filepath.Glob(filepath.Join(classRoot, "hci*"))
-	if err != nil {
+	if err != nil || len(paths) == 0 {
 		return nil
 	}
+	metadata := blueZAdapterMetadata()
 	result := make([]Device, 0, len(paths))
 	for _, adapterPath := range paths {
-		result = append(result, inspectBluetoothAdapter(adapterPath))
+		result = append(result, inspectBluetoothAdapter(adapterPath, metadata[filepath.Base(adapterPath)]))
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ResourceName < result[j].ResourceName })
 	return result
 }
 
-func inspectBluetoothAdapter(adapterPath string) Device {
+type bluetoothAdapterMetadata struct {
+	Name    string
+	Address string
+}
+
+func blueZAdapterMetadata() map[string]bluetoothAdapterMetadata {
+	conn, err := dbus.ConnectSystemBus()
+	if err != nil {
+		klog.V(4).Infof("connect to BlueZ system bus: %v", err)
+		return nil
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var objects map[dbus.ObjectPath]map[string]map[string]dbus.Variant
+	call := conn.Object("org.bluez", "/").CallWithContext(ctx, "org.freedesktop.DBus.ObjectManager.GetManagedObjects", 0)
+	if call.Err != nil {
+		klog.V(4).Infof("read BlueZ adapter metadata: %v", call.Err)
+		return nil
+	}
+	if err := call.Store(&objects); err != nil {
+		klog.V(4).Infof("decode BlueZ adapter metadata: %v", err)
+		return nil
+	}
+	result := make(map[string]bluetoothAdapterMetadata)
+	for objectPath, interfaces := range objects {
+		properties, ok := interfaces["org.bluez.Adapter1"]
+		if !ok {
+			continue
+		}
+		adapter := filepath.Base(string(objectPath))
+		metadata := bluetoothAdapterMetadata{
+			Name:    dbusString(properties["Name"]),
+			Address: dbusString(properties["Address"]),
+		}
+		if metadata.Name == "" {
+			metadata.Name = dbusString(properties["Alias"])
+		}
+		result[adapter] = metadata
+	}
+	return result
+}
+
+func dbusString(value dbus.Variant) string {
+	result, _ := value.Value().(string)
+	return strings.TrimSpace(result)
+}
+
+func inspectBluetoothAdapter(adapterPath string, metadata bluetoothAdapterMetadata) Device {
 	adapter := filepath.Base(adapterPath)
 	hardwarePath, err := filepath.EvalSymlinks(filepath.Join(adapterPath, "device"))
 	if err != nil {
 		hardwarePath = filepath.Join(adapterPath, "device")
 	}
 	displayName := readTrimmed(filepath.Join(adapterPath, "name"))
+	if displayName == "" {
+		displayName = metadata.Name
+	}
+	address := readTrimmed(filepath.Join(adapterPath, "address"))
+	if address == "" {
+		address = metadata.Address
+	}
 	physicalPath := hardwarePath
 	stable := false
 	var identity string
@@ -162,7 +221,7 @@ func inspectBluetoothAdapter(adapterPath string) Device {
 		Selectable:    true,
 		PortUnstable:  !stable,
 		Adapter:       adapter,
-		Address:       readTrimmed(filepath.Join(adapterPath, "address")),
+		Address:       address,
 		AccessMode:    "shared",
 		Type:          "bluetooth",
 		PluginManaged: false,

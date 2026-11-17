@@ -295,6 +295,25 @@ func TestBluetoothAddressDoesNotDefineIdentity(t *testing.T) {
 	}
 }
 
+func TestInspectBluetoothAdapterUsesBlueZMetadataWhenSysfsOmitsIt(t *testing.T) {
+	root := t.TempDir()
+	classRoot := filepath.Join(root, "class", "bluetooth")
+	parent := filepath.Join(root, "devices", "usb1", "1-14")
+	iface := filepath.Join(parent, "1-14:1.0")
+	writeTestFiles(t, parent, map[string]string{"idVendor": "8087\n", "idProduct": "0033\n"})
+	if err := os.MkdirAll(iface, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	createBluetoothAdapterFixture(t, classRoot, "hci0", iface, "", "")
+
+	device := inspectBluetoothAdapter(filepath.Join(classRoot, "hci0"), bluetoothAdapterMetadata{
+		Name: "olares", Address: "DC:45:46:63:3A:20",
+	})
+	if device.DisplayName != "olares" || device.Address != "DC:45:46:63:3A:20" {
+		t.Fatalf("Bluetooth metadata = %#v", device)
+	}
+}
+
 func writeTestFiles(t *testing.T, directory string, files map[string]string) {
 	t.Helper()
 	if err := os.MkdirAll(directory, 0o755); err != nil {

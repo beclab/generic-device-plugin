@@ -29,21 +29,23 @@ import (
 )
 
 type fakeNodeClient struct {
-	node       *corev1.Node
-	patchCalls int
+	node          *corev1.Node
+	patchCalls    int
+	patchedLabels bool
 }
 
 func (f *fakeNodeClient) Patch(_ context.Context, _ string, _ types.PatchType, data []byte, _ metav1.PatchOptions, _ ...string) (*corev1.Node, error) {
 	f.patchCalls++
 	var patch struct {
 		Metadata struct {
-			Annotations map[string]string `json:"annotations"`
+			Annotations map[string]string  `json:"annotations"`
 			Labels      map[string]*string `json:"labels"`
 		} `json:"metadata"`
 	}
 	if err := json.Unmarshal(data, &patch); err != nil {
 		return nil, err
 	}
+	f.patchedLabels = f.patchedLabels || patch.Metadata.Labels != nil
 	if f.node.Annotations == nil {
 		f.node.Annotations = map[string]string{}
 	}
@@ -102,11 +104,11 @@ func TestPublisherUsesKubernetesClientForNodeAndLease(t *testing.T) {
 		}},
 	}
 
-	if err := publisher.Publish(ctx, inventory, true); err != nil {
+	if err := publisher.Publish(ctx, inventory); err != nil {
 		t.Fatalf("Publish() error = %v", err)
 	}
-	if nodes.node.Labels[bluetoothLabel] != "true" {
-		t.Fatalf("bluetooth label = %q, want true", nodes.node.Labels[bluetoothLabel])
+	if nodes.patchedLabels {
+		t.Fatal("publisher unexpectedly patched node labels")
 	}
 	var got Inventory
 	if err := json.Unmarshal([]byte(nodes.node.Annotations[inventoryAnnotation]), &got); err != nil {
@@ -128,11 +130,8 @@ func TestPublisherUsesKubernetesClientForNodeAndLease(t *testing.T) {
 
 	secondRenewal := firstRenewal.Add(5 * time.Second)
 	publisher.now = func() time.Time { return secondRenewal }
-	if err := publisher.Publish(ctx, inventory, false); err != nil {
+	if err := publisher.Publish(ctx, inventory); err != nil {
 		t.Fatalf("second Publish() error = %v", err)
-	}
-	if _, exists := nodes.node.Labels[bluetoothLabel]; exists {
-		t.Fatalf("bluetooth label was not removed: %#v", nodes.node.Labels)
 	}
 	if leases.lease.Spec.RenewTime == nil || !leases.lease.Spec.RenewTime.Time.Equal(secondRenewal) {
 		t.Fatalf("updated lease renewal = %v, want %v", leases.lease.Spec.RenewTime, secondRenewal)
@@ -145,10 +144,10 @@ func TestPublisherSkipsUnchangedNodePatchButRenewsLease(t *testing.T) {
 	leases := &fakeLeaseClient{}
 	publisher := newPublisher("node-a", nodes, leases)
 	inventory := Inventory{SchemaVersion: 1}
-	if err := publisher.Publish(ctx, inventory, false); err != nil {
+	if err := publisher.Publish(ctx, inventory); err != nil {
 		t.Fatalf("first Publish() error = %v", err)
 	}
-	if err := publisher.Publish(ctx, inventory, false); err != nil {
+	if err := publisher.Publish(ctx, inventory); err != nil {
 		t.Fatalf("second Publish() error = %v", err)
 	}
 	if nodes.patchCalls != 1 {

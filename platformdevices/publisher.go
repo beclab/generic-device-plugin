@@ -23,7 +23,6 @@ import (
 
 const (
 	inventoryAnnotation   = "bytetrade.io/devices"
-	bluetoothLabel        = "devices.bytetrade.io/bluetooth-capable"
 	leaseNamespace        = "kube-node-lease"
 	leasePrefix           = "generic-device-plugin-"
 	maxInventoryJSONBytes = 200 * 1024
@@ -69,24 +68,19 @@ func newPublisher(nodeName string, nodes nodeClient, leases leaseClient) *Publis
 	return &Publisher{nodeName: nodeName, nodes: nodes, leases: leases, now: time.Now}
 }
 
-func (p *Publisher) Publish(ctx context.Context, inventory Inventory, bluetoothCapable bool) error {
+func (p *Publisher) Publish(ctx context.Context, inventory Inventory) error {
 	annotation, err := marshalInventory(inventory, maxInventoryJSONBytes)
 	if err != nil {
 		return err
 	}
 	sum := sha256.Sum256(annotation)
-	hash := hex.EncodeToString(sum[:]) + fmt.Sprintf(":%t", bluetoothCapable)
+	hash := hex.EncodeToString(sum[:])
 	p.mu.Lock()
 	changed := p.lastHash != hash
 	p.mu.Unlock()
 	if changed {
-		var bluetoothValue any
-		if bluetoothCapable {
-			bluetoothValue = "true"
-		}
 		payload, err := json.Marshal(map[string]any{"metadata": map[string]any{
 			"annotations": map[string]string{inventoryAnnotation: string(annotation)},
-			"labels":      map[string]any{bluetoothLabel: bluetoothValue},
 		}})
 		if err != nil {
 			return fmt.Errorf("marshal node inventory patch: %w", err)

@@ -86,7 +86,7 @@ func (m *Manager) reconcile(ctx context.Context, publisher *Publisher) error {
 		}
 	}
 	for resourceName, device := range current {
-		if !device.Selectable {
+		if !shouldRunDevicePlugin(device) {
 			continue
 		}
 		if _, ok := m.plugins[resourceName]; ok {
@@ -105,7 +105,11 @@ func (m *Manager) reconcile(ctx context.Context, publisher *Publisher) error {
 		m.plugins[resourceName] = runningPlugin{cancel: cancel, done: done}
 		_ = level.Info(m.config.Logger).Log("msg", "started platform device plugin", "resource", resourceName)
 	}
-	return publisher.Publish(ctx, BuildInventory(devices), BluetoothCapable())
+	return publisher.Publish(ctx, BuildInventory(devices))
+}
+
+func shouldRunDevicePlugin(device Device) bool {
+	return device.Selectable && device.PluginManaged
 }
 
 func (m *Manager) stopAll() {

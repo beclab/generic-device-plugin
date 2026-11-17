@@ -5,13 +5,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"k8s.io/klog/v2"
-	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -25,17 +23,21 @@ var audioCardPattern = regexp.MustCompile(`^/dev/snd/controlC([0-9]+)$`)
 var usbInterfaceSuffixPattern = regexp.MustCompile(`:[0-9]+\.[0-9]+$`)
 
 type Device struct {
-	UID          string   `json:"uid"`
-	ResourceName string   `json:"resourceName"`
-	DisplayName  string   `json:"displayName,omitempty"`
-	Online       bool     `json:"online"`
-	Selectable   bool     `json:"selectable"`
-	KernelPaths  []string `json:"kernelPaths,omitempty"`
-	PortUnstable bool     `json:"portUnstable,omitempty"`
-	Reason       string   `json:"reason,omitempty"`
-	Type         string   `json:"-"`
-	physicalPath string
-	serialBased  bool
+	UID           string   `json:"uid"`
+	ResourceName  string   `json:"resourceName"`
+	DisplayName   string   `json:"displayName,omitempty"`
+	Online        bool     `json:"online"`
+	Selectable    bool     `json:"selectable"`
+	KernelPaths   []string `json:"kernelPaths,omitempty"`
+	PortUnstable  bool     `json:"portUnstable,omitempty"`
+	Reason        string   `json:"reason,omitempty"`
+	Adapter       string   `json:"adapter,omitempty"`
+	Address       string   `json:"address,omitempty"`
+	AccessMode    string   `json:"accessMode,omitempty"`
+	Type          string   `json:"-"`
+	PluginManaged bool     `json:"-"`
+	physicalPath  string
+	serialBased   bool
 }
 
 type Inventory struct {
@@ -44,6 +46,7 @@ type Inventory struct {
 	Video         []Device `json:"video,omitempty"`
 	Audio         []Device `json:"audio,omitempty"`
 	HID           []Device `json:"hid,omitempty"`
+	Bluetooth     []Device `json:"bluetooth,omitempty"`
 }
 
 func Scan() ([]Device, error) {
@@ -103,11 +106,99 @@ func Scan() ([]Device, error) {
 		paths = append([]string{control}, paths...)
 		result = append(result, inspectDevice("audio", paths))
 	}
+	result = append(result, scanBluetoothAdaptersAt("/sys/class/bluetooth")...)
 	result = mergeDeviceGroups(result)
 	if err := syncDeviceIndexAt(deviceIndexRoot, result); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+func scanBluetoothAdaptersAt(classRoot string) []Device {
+	paths, err := filepath.Glob(filepath.Join(classRoot, "hci*"))
+	if err != nil {
+		return nil
+	}
+	result := make([]Device, 0, len(paths))
+	for _, adapterPath := range paths {
+		result = append(result, inspectBluetoothAdapter(adapterPath))
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ResourceName < result[j].ResourceName })
+	return result
+}
+
+func inspectBluetoothAdapter(adapterPath string) Device {
+	adapter := filepath.Base(adapterPath)
+	hardwarePath, err := filepath.EvalSymlinks(filepath.Join(adapterPath, "device"))
+	if err != nil {
+		hardwarePath = filepath.Join(adapterPath, "device")
+	}
+	displayName := readTrimmed(filepath.Join(adapterPath, "name"))
+	physicalPath := hardwarePath
+	stable := false
+	var identity string
+	if usbParent, ok := findUSBParent(hardwarePath); ok {
+		physicalPath = usbParent
+		identity, stable = buildUSBIdentity(usbParent, physicalPath, "class=bluetooth")
+		if displayName == "" {
+			displayName = usbDisplayName(usbParent)
+		}
+	} else {
+		vendor, product := sysfsVendorProduct(hardwarePath)
+		identity = strings.Join([]string{
+			"uid=v2", "bus=bluetooth", "path=" + physicalPath,
+			"vendor=" + vendor, "product=" + product, "class=bluetooth",
+		}, "\x00")
+	}
+	if displayName == "" {
+		displayName = adapter
+	}
+	uid := stableUID(identity, stable)
+	return Device{
+		UID:           uid,
+		ResourceName:  fmt.Sprintf("%s/bluetooth-%s", resourceDomain, uid),
+		DisplayName:   displayName,
+		Online:        true,
+		Selectable:    true,
+		PortUnstable:  !stable,
+		Adapter:       adapter,
+		Address:       readTrimmed(filepath.Join(adapterPath, "address")),
+		AccessMode:    "shared",
+		Type:          "bluetooth",
+		PluginManaged: false,
+		physicalPath:  physicalPath,
+		serialBased:   stable,
+	}
+}
+
+func findUSBParent(sysPath string) (string, bool) {
+	for current := sysPath; ; current = filepath.Dir(current) {
+		if readTrimmed(filepath.Join(current, "idVendor")) != "" && readTrimmed(filepath.Join(current, "idProduct")) != "" {
+			return current, true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", false
+		}
+	}
+}
+
+func sysfsVendorProduct(sysPath string) (vendor, product string) {
+	for current := sysPath; ; current = filepath.Dir(current) {
+		if vendor == "" {
+			vendor = readTrimmed(filepath.Join(current, "vendor"))
+		}
+		if product == "" {
+			product = readTrimmed(filepath.Join(current, "device"))
+		}
+		if vendor != "" && product != "" {
+			return vendor, product
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return vendor, product
+		}
+	}
 }
 
 type videoPathGroup struct {
@@ -156,15 +247,7 @@ func usbParentForDevicePath(devicePath, class string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	for current := sysPath; ; current = filepath.Dir(current) {
-		if readTrimmed(filepath.Join(current, "idVendor")) != "" && readTrimmed(filepath.Join(current, "idProduct")) != "" {
-			return current, true
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return "", false
-		}
-	}
+	return findUSBParent(sysPath)
 }
 
 func sysfsDevicePath(devicePath, class, name string) (string, error) {
@@ -198,16 +281,17 @@ func inspectUSBSerialDevice(devicePath, usbParent string) Device {
 	}
 	uid := stableUID(identity, stable)
 	return Device{
-		UID:          uid,
-		ResourceName: fmt.Sprintf("%s/serial-%s", resourceDomain, uid),
-		DisplayName:  displayName,
-		Online:       true,
-		Selectable:   true,
-		KernelPaths:  []string{devicePath},
-		PortUnstable: !stable,
-		Type:         "serial",
-		physicalPath: physicalPath,
-		serialBased:  stable,
+		UID:           uid,
+		ResourceName:  fmt.Sprintf("%s/serial-%s", resourceDomain, uid),
+		DisplayName:   displayName,
+		Online:        true,
+		Selectable:    true,
+		KernelPaths:   []string{devicePath},
+		PortUnstable:  !stable,
+		Type:          "serial",
+		PluginManaged: true,
+		physicalPath:  physicalPath,
+		serialBased:   stable,
 	}
 }
 
@@ -286,16 +370,17 @@ func inspectUSBVideoDevice(paths []string, usbParent string) Device {
 	}
 	uid := stableUID(identity, stable)
 	return Device{
-		UID:          uid,
-		ResourceName: fmt.Sprintf("%s/video-%s", resourceDomain, uid),
-		DisplayName:  displayName,
-		Online:       true,
-		Selectable:   true,
-		KernelPaths:  paths,
-		PortUnstable: !stable,
-		Type:         "video",
-		physicalPath: physicalPath,
-		serialBased:  stable,
+		UID:           uid,
+		ResourceName:  fmt.Sprintf("%s/video-%s", resourceDomain, uid),
+		DisplayName:   displayName,
+		Online:        true,
+		Selectable:    true,
+		KernelPaths:   paths,
+		PortUnstable:  !stable,
+		Type:          "video",
+		PluginManaged: true,
+		physicalPath:  physicalPath,
+		serialBased:   stable,
 	}
 }
 
@@ -377,16 +462,17 @@ func inspectDevice(class string, paths []string) Device {
 	identity, displayName, physicalPath, stable := sysfsIdentity(primary)
 	uid := stableUID(identity, stable)
 	device := Device{
-		UID:          uid,
-		ResourceName: fmt.Sprintf("%s/%s-%s", resourceDomain, class, uid),
-		DisplayName:  displayName,
-		Online:       true,
-		Selectable:   true,
-		KernelPaths:  paths,
-		PortUnstable: !stable,
-		Type:         class,
-		physicalPath: physicalPath,
-		serialBased:  stable,
+		UID:           uid,
+		ResourceName:  fmt.Sprintf("%s/%s-%s", resourceDomain, class, uid),
+		DisplayName:   displayName,
+		Online:        true,
+		Selectable:    true,
+		KernelPaths:   paths,
+		PortUnstable:  !stable,
+		Type:          class,
+		PluginManaged: true,
+		physicalPath:  physicalPath,
+		serialBased:   stable,
 	}
 	if device.DisplayName == "" {
 		device.DisplayName = filepath.Base(primary)
@@ -537,17 +623,9 @@ func BuildInventory(devices []Device) Inventory {
 			result.Audio = append(result.Audio, device)
 		case "hid":
 			result.HID = append(result.HID, device)
+		case "bluetooth":
+			result.Bluetooth = append(result.Bluetooth, device)
 		}
 	}
 	return result
-}
-
-func BluetoothCapable() bool {
-	connection, err := net.DialTimeout("unix", "/run/dbus/system_bus_socket", time.Second)
-	if err != nil {
-		return false
-	}
-	_ = connection.Close()
-	adapters, err := filepath.Glob("/sys/class/bluetooth/hci*")
-	return err == nil && len(adapters) > 0
 }

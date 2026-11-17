@@ -3,6 +3,7 @@ package platformdevices
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -216,6 +217,105 @@ func TestUSBPhysicalPathRemovesInterfaceSuffix(t *testing.T) {
 	}
 	if got := usbPhysicalPath(nil, "/sys/fallback"); got != "/sys/fallback" {
 		t.Fatalf("fallback USB physical path = %q", got)
+	}
+}
+
+func TestScanBluetoothAdaptersBuildsStableAndPortIdentities(t *testing.T) {
+	root := t.TempDir()
+	classRoot := filepath.Join(root, "class", "bluetooth")
+	if err := os.MkdirAll(classRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	stableParent := filepath.Join(root, "devices", "usb1", "1-2")
+	stableInterface := filepath.Join(stableParent, "1-2:1.0")
+	writeTestFiles(t, stableParent, map[string]string{
+		"idVendor": "8087\n", "idProduct": "0026\n", "serial": "intel-bt-123\n",
+		"manufacturer": "Intel\n", "product": "Wireless Bluetooth\n",
+	})
+	if err := os.MkdirAll(stableInterface, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	createBluetoothAdapterFixture(t, classRoot, "hci0", stableInterface, "Intel Adapter", "A4:C3:F0:12:34:56")
+
+	portParent := filepath.Join(root, "devices", "usb1", "1-3")
+	portInterface := filepath.Join(portParent, "1-3:1.0")
+	writeTestFiles(t, portParent, map[string]string{
+		"idVendor": "0a12\n", "idProduct": "0001\n", "product": "USB Bluetooth Adapter\n",
+	})
+	if err := os.MkdirAll(portInterface, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	createBluetoothAdapterFixture(t, classRoot, "hci1", portInterface, "", "00:1A:7D:DA:71:13")
+
+	devices := scanBluetoothAdaptersAt(classRoot)
+	if len(devices) != 2 {
+		t.Fatalf("Bluetooth devices = %#v", devices)
+	}
+	byAdapter := map[string]Device{devices[0].Adapter: devices[0], devices[1].Adapter: devices[1]}
+	stable := byAdapter["hci0"]
+	if !strings.HasPrefix(stable.UID, "s-") || stable.PortUnstable || stable.PluginManaged {
+		t.Fatalf("stable Bluetooth adapter = %#v", stable)
+	}
+	if stable.Address != "A4:C3:F0:12:34:56" || stable.AccessMode != "shared" || stable.DisplayName != "Intel Adapter" {
+		t.Fatalf("stable Bluetooth metadata = %#v", stable)
+	}
+	port := byAdapter["hci1"]
+	if !strings.HasPrefix(port.UID, "p-") || !port.PortUnstable || port.PluginManaged {
+		t.Fatalf("port Bluetooth adapter = %#v", port)
+	}
+	if port.DisplayName != "USB Bluetooth Adapter" {
+		t.Fatalf("port Bluetooth display name = %q", port.DisplayName)
+	}
+	if stable.ResourceName == port.ResourceName {
+		t.Fatal("different Bluetooth adapters produced the same resource name")
+	}
+
+	inventory := BuildInventory(devices)
+	if len(inventory.Bluetooth) != 2 || inventory.Bluetooth[0].Type != "bluetooth" {
+		t.Fatalf("Bluetooth inventory = %#v", inventory.Bluetooth)
+	}
+}
+
+func TestBluetoothAddressDoesNotDefineIdentity(t *testing.T) {
+	root := t.TempDir()
+	classRoot := filepath.Join(root, "class", "bluetooth")
+	for i, adapter := range []string{"hci0", "hci1"} {
+		parent := filepath.Join(root, "devices", "usb1", fmt.Sprintf("1-%d", i+2))
+		iface := filepath.Join(parent, fmt.Sprintf("1-%d:1.0", i+2))
+		writeTestFiles(t, parent, map[string]string{"idVendor": "0a12\n", "idProduct": "0001\n"})
+		if err := os.MkdirAll(iface, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		createBluetoothAdapterFixture(t, classRoot, adapter, iface, adapter, "00:00:00:00:00:00")
+	}
+	devices := scanBluetoothAdaptersAt(classRoot)
+	if len(devices) != 2 || devices[0].ResourceName == devices[1].ResourceName {
+		t.Fatalf("duplicate addresses collapsed adapters: %#v", devices)
+	}
+}
+
+func writeTestFiles(t *testing.T, directory string, files map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range files {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(value), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func createBluetoothAdapterFixture(t *testing.T, classRoot, adapter, hardwarePath, name, address string) {
+	t.Helper()
+	adapterPath := filepath.Join(classRoot, adapter)
+	if err := os.MkdirAll(adapterPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFiles(t, adapterPath, map[string]string{"name": name + "\n", "address": address + "\n"})
+	if err := os.Symlink(hardwarePath, filepath.Join(adapterPath, "device")); err != nil {
+		t.Fatal(err)
 	}
 }
 

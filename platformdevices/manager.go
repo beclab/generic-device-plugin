@@ -22,8 +22,14 @@ type ManagerConfig struct {
 }
 
 type runningPlugin struct {
-	cancel context.CancelFunc
-	done   <-chan error
+	cancel  context.CancelFunc
+	done    <-chan error
+	metrics *pluginMetrics
+}
+
+type pluginMetrics struct {
+	registry   *prometheus.Registry
+	registerer prometheus.Registerer
 }
 
 type Manager struct {
@@ -73,6 +79,7 @@ func (m *Manager) reconcile(ctx context.Context, publisher *Publisher) error {
 	for resourceName, running := range m.plugins {
 		select {
 		case runErr := <-running.done:
+			running.metrics.unregister()
 			delete(m.plugins, resourceName)
 			if runErr != nil && ctx.Err() == nil {
 				_ = level.Warn(m.config.Logger).Log("msg", "platform device plugin exited", "resource", resourceName, "err", runErr)
@@ -82,6 +89,7 @@ func (m *Manager) reconcile(ctx context.Context, publisher *Publisher) error {
 		}
 		if _, ok := current[resourceName]; !ok {
 			running.cancel()
+			running.metrics.unregister()
 			delete(m.plugins, resourceName)
 		}
 	}
@@ -98,14 +106,40 @@ func (m *Manager) reconcile(ctx context.Context, publisher *Publisher) error {
 		}
 		spec.Default()
 		pluginCtx, cancel := context.WithCancel(ctx)
-		registerer := prometheus.WrapRegistererWith(prometheus.Labels{"resource": resourceName}, m.config.Registerer)
-		plugin := deviceplugin.NewGenericPlugin(spec, m.config.PluginDir, log.With(m.config.Logger, "resource", resourceName), registerer, false)
+		metrics := newPluginMetrics(m.config.Registerer, resourceName)
+		plugin := deviceplugin.NewGenericPlugin(spec, m.config.PluginDir, log.With(m.config.Logger, "resource", resourceName), metrics.registry, false)
+		if err := metrics.register(); err != nil {
+			cancel()
+			return fmt.Errorf("register metrics for platform device %s: %w", resourceName, err)
+		}
 		done := make(chan error, 1)
 		go func() { done <- plugin.Run(pluginCtx) }()
-		m.plugins[resourceName] = runningPlugin{cancel: cancel, done: done}
+		m.plugins[resourceName] = runningPlugin{cancel: cancel, done: done, metrics: metrics}
 		_ = level.Info(m.config.Logger).Log("msg", "started platform device plugin", "resource", resourceName)
 	}
 	return publisher.Publish(ctx, BuildInventory(devices), BluetoothCapable())
+}
+
+func newPluginMetrics(registerer prometheus.Registerer, resourceName string) *pluginMetrics {
+	metrics := &pluginMetrics{registry: prometheus.NewRegistry()}
+	if registerer != nil {
+		metrics.registerer = prometheus.WrapRegistererWith(prometheus.Labels{"resource": resourceName}, registerer)
+	}
+	return metrics
+}
+
+func (m *pluginMetrics) register() error {
+	if m.registerer == nil {
+		return nil
+	}
+	return m.registerer.Register(m.registry)
+}
+
+func (m *pluginMetrics) unregister() {
+	if m == nil || m.registerer == nil {
+		return
+	}
+	m.registerer.Unregister(m.registry)
 }
 
 func (m *Manager) stopAll() {
@@ -120,5 +154,7 @@ func (m *Manager) stopAll() {
 			}
 		case <-time.After(time.Second):
 		}
+		plugin.metrics.unregister()
+		delete(m.plugins, name)
 	}
 }

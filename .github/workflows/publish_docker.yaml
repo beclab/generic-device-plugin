@@ -24,6 +24,8 @@ jobs:
           tags: beclab/generic-device-plugin:${{ github.event.inputs.tags }}-amd64
           file: Dockerfile
           platforms: linux/amd64
+          provenance: false
+          sbom: false
   publish_dockerhub_arm64:
     runs-on: self-hosted
     steps:
@@ -41,6 +43,8 @@ jobs:
           tags: beclab/generic-device-plugin:${{ github.event.inputs.tags }}-arm64
           file: Dockerfile
           platforms: linux/arm64
+          provenance: false
+          sbom: false
 
   publish_manifest:
     needs:
